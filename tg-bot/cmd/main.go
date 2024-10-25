@@ -2,21 +2,14 @@ package main
 
 import (
 	"context"
-	"log"
-	"os/signal"
-	"tg-bot/models/bot"
-
-	"os"
-	"regexp"
-
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"github.com/joho/godotenv"
-)
-
-var (
-	msgs  = make(map[int64]*tgbotapi.Message)
-	flags = make(map[int64]bool)
-	re    = regexp.MustCompile(`@\w+ ctrl (\d+)([a-z])`)
+	"log"
+	"os"
+	"os/signal"
+	"tg-bot/internal/handlers"
+	"tg-bot/internal/models/bot"
+	"tg-bot/internal/services/bot_service"
 )
 
 func main() {
@@ -33,20 +26,22 @@ func main() {
 	}
 
 	tgBot := bot.NewBot(botToken)
+	botService := bot_service.NewBotService(tgBot)
 
-	tgBot.Debug = true
+	tgBot.(*bot.BotImpl).Debug = true
 
 	u := tgbotapi.NewUpdate(0)
 	u.Timeout = 60
 
+	handler := handlers.NewHandler()
+
 	updates := tgBot.GetUpdatesChan(u)
 
-	ctx := context.Background()
-	ctx, cancel := context.WithCancel(ctx)
+	ctx, cancel := initContext()
 
-	tgBot.RestoreTasks()
+	botService.RestoreTasks()
 
-	go receiveUpdates(ctx, tgBot, updates)
+	go receiveUpdates(ctx, botService, handler, updates)
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt)
@@ -56,47 +51,19 @@ func main() {
 	log.Println("Bot stopped")
 }
 
-func receiveUpdates(ctx context.Context, tgBot *bot.Bot, updates tgbotapi.UpdatesChannel) {
+func initContext() (context.Context, context.CancelFunc) {
+	ctx := context.Background()
+	ctx, cancel := context.WithCancel(ctx)
+	return ctx, cancel
+}
+
+func receiveUpdates(ctx context.Context, botService *bot_service.BotService, handler handlers.Handler, updates tgbotapi.UpdatesChannel) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case update := <-updates:
-			handleUpdate(tgBot, update)
+			go handler.HandleUpdate(botService, update)
 		}
-	}
-}
-
-func handleUpdate(tgBot *bot.Bot, update tgbotapi.Update) {
-	switch {
-	case update.Message != nil:
-		if update.Message.Text == "Добавить напоминание" {
-			tgBot.DeleteMessage(update.Message)
-			go tgBot.CreateReminder(update.Message)
-			flags[update.Message.From.ID] = true
-
-		} else if re.Match([]byte(update.Message.Text)) {
-			go tgBot.HandleCommand(update.Message, msgs[update.Message.From.ID])
-
-		} else if !flags[update.Message.From.ID] {
-			msgs[update.Message.From.ID] = update.Message
-
-		} else {
-			flags[update.Message.From.ID] = tgBot.UpdateReminder(update.Message)
-		}
-
-	case update.CallbackQuery != nil:
-		tgBot.HandleCallbackQuery(update.CallbackQuery)
-		flags[update.CallbackQuery.From.ID] = false
-
-	case update.MyChatMember != nil:
-		tgBot.HandleMyChatMemberUpdate(update.MyChatMember)
-		return
-
-	case update.EditedMessage != nil:
-		msgs[update.EditedMessage.From.ID] = update.EditedMessage
-
-	default:
-		return
 	}
 }
